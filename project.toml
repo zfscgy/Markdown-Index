@@ -1,0 +1,5 @@
+[tool.setuptools]
+package-dir = {"" = "markdown_index"}
+
+[tool.setuptools.package-data]
+tokenizers_dir = ["markdown_index/tokenizers"]
