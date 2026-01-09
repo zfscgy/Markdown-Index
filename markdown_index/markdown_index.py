@@ -4,7 +4,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-from tokenizers.get_tokenizer import get_tokenizer, Tokenizer
+from tokenizers import Tokenizer
+from markdown_index.utils import get_tokenizer, get_table_ranges
 
 
 class MarkdownNode:
@@ -133,39 +134,13 @@ def extract_nodes(
     return nodes
 
 
-def get_tables(markdown_content: str) -> List[Tuple[int, int]]:
-    lines = markdown_content.split('\n')
-    
-    table_ranges = []
-
-    in_table: str = "no"  # header-0 | header-1 | body | no
-    
-    current_table_start = None
-    current_table_cols = None
-    for i in range(len(lines)):
-        line = lines[i].strip()
-        if line[0] == line[-1] == "|":
-            if in_table == "no":
-                in_table = "header-0"
-                current_table_start = i
-                current_table_cols = line.count("|")
-            elif in_table == "header-0":
-                # This line is made of "|" and "-", so we believe it is the table header line
-                if (line.count("|") == current_table_cols) and \
-                    ("---" in line) and \
-                    (line.replace("-", "").replace("|", "").strip() == ""):  
-                    in_table = "header-1"
-                else:
-                    current_table_start = None
-                    in_table = "no"  # Unexpected second row, exit
-            elif in_table in ["header-1", "body"]:
-                if line.count("|") == current_table_cols:
-                    in_table = "body"
-                else:
-                    table_ranges.append((current_table_start, i+1))  # The end row is exclusive
-                    current_table_start = None
-                    in_table = "no"  # Unexpected row, exit
-            else:  # Shall not be executed
+def improve_table_split(markdown_content: str, nodes: List[MarkdownNode]) -> List[MarkdownNode]:
+    tables = get_table_ranges(markdown_content)
+    for node in nodes:
+        # Check if any node contains splitted table
+        for table_start, table_end in tables:
+            # The node only contains part of the table (the header is missed!)
+            if node.line_start >= table_start and node.line_start < table_end:
                 pass
 
-    return table_ranges
+    return nodes
