@@ -6,7 +6,7 @@ from importlib import resources
 from tokenizers import Tokenizer
 
 
-tokenizers_dir = resources.files("tokenizers_dir")
+tokenizers_dir = resources.files("markdown_index") / "tokenizer_files"
 
 
 name_to_file = {
@@ -20,7 +20,7 @@ name_to_file = {
 
 def get_tokenizer(model_name: str) -> Tokenizer:
     file_name = name_to_file.get(model_name, name_to_file["default"])
-    return Tokenizer.from_file(file_name)
+    return Tokenizer.from_file(file_name.as_posix())
 
 
 def get_table_ranges(markdown_content: str) -> List[Tuple[int, int]]:

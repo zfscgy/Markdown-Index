@@ -8,7 +8,6 @@ def test__get_tables():
     for start, end in tables:
         print("========= Table ==========")
         print("\n".join(md_lines[start:end]))
-        
 
 
 if __name__ == "__main__":
