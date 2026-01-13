@@ -1,11 +1,17 @@
-from typing import Self, Optional, List, Dict, Tuple
+from typing import Self, Optional, List, Dict, Tuple, Any
 
 import logging
 logger = logging.getLogger(__name__)
 
+import concurrent.futures
 
 from tokenizers import Tokenizer
+
+import json
+
 from markdown_index.utils import get_tokenizer, get_table_ranges
+from markdown_index.chat import LLMChat
+from markdown_index.llm_ops.base import LLMOps, get_templates
 
 
 class MarkdownNode:
@@ -27,6 +33,12 @@ class MarkdownNode:
 
         self.level: int = (len(self.title) - len(self.title.lstrip('#'))) or 999
         self.is_forced_split: bool = is_forced_split
+
+    def full_title(self):
+        title = self.title.lstrip("#")
+        if self.parent is not None:
+            title = self.parent.full_title() + " > " + title.lstrip("#")
+        return title
 
 
 def extract_nodes(
@@ -119,8 +131,6 @@ def extract_nodes(
                 ))
                 start_line = current_end_index - 1
 
-        splitted_nodes[-1].text = splitted_nodes[-1].text.removeprefix("\n")
-
         return splitted_nodes
 
 
@@ -138,6 +148,9 @@ def extract_nodes(
             for idx, splitted_node in enumerate(splitted_nodes[full_node]):
                 nodes.insert(parent_node_idx + idx + 1, splitted_node)
             nodes.remove(full_node)  # Delete the "full node"
+        
+        if nodes[-1].is_forced_split:  # Split will add an extra "\n" to the last node
+            nodes[-1].text = nodes[-1].text.removesuffix("\n")
 
     return nodes
 
@@ -152,22 +165,133 @@ def improve_table_split(markdown_content: str, nodes: List[MarkdownNode]) -> Lis
                 # The header first line is in the previous node, i.e.,
                 # | col1 | col2 | col3 |
                 if node.line_start == table_start + 1:
-                    table_first_line = nodes[i-1].split("\n")[-1] + "\n"
+                    table_first_line = nodes[i-1].text.split("\n")[-1] + "\n"
                     node.text = table_first_line + node.text
                     nodes[i-1].text = nodes[i-1].text.removesuffix(table_first_line)
                 # Previous node only contain the first two lines of the table, i.e.,
                 # | col1 | col2 | col3 |
                 # |------|------|------|
                 elif node.line_start == table_start + 2:
-                    table_first_two_lines = "\n".join(nodes[i-1].split("\n")[-2:]) + "\n"
+                    table_first_two_lines = "\n".join(nodes[i-1].text.split("\n")[-2:]) + "\n"
                     node.text = table_first_two_lines + node.text
                     nodes[i-1].text = nodes[i-1].text.removesuffix(table_first_two_lines)
                 # Previous node also contains some of the table's main body
                 # Just copy the table header to the next node
                 else:
-                    table_first_two_lines = "\n".join(nodes[i-1].split("\n")[-2:]) + "\n"
+                    table_first_two_lines = "\n".join(nodes[i-1].text.split("\n")[-2:]) + "\n"
                     node.text = table_first_two_lines + node.text
                 # One node could only miss one table header
                 break
 
-    return nodes
+    return nodes, tables
+
+
+class MarkdownIndex:
+    def __init__(
+        self,
+
+        markdown_content: str,
+        
+        openai_model_name: str,
+        openai_base_url: str,
+        openai_api_key: str,
+        openai_timeout: float = 1000,
+        llm_parallel_workers: int = 10,
+                
+        tokenizer: str = "default",
+        language: str = "en",
+
+        max_tokens_per_node: Optional[int]=None,
+        improve_table_split: bool = True,
+
+        summary_words: int = 50,
+        approx_max_input_tokens: int = 8000,
+
+        max_retry: int = 3,
+        wait_time: float = 10
+    ):
+        self.markdown_content = markdown_content
+
+        self.openai_model_name = openai_model_name
+        self.openai_base_url = openai_base_url
+        self.openai_api_key = openai_api_key
+        self.openai_timeout = openai_timeout
+        self.llm_parallel_workers = llm_parallel_workers
+
+        self.max_tokens_per_node = max_tokens_per_node
+        self.tokenizer = tokenizer
+        self.language = language
+        
+        self.chat = LLMChat(
+            model=self.openai_model_name,
+            base_url=self.openai_base_url,
+            api_key=self.openai_api_key,
+            timeout=self.openai_timeout
+        )
+
+        self.llm_ops = LLMOps(
+            chat=self.chat,
+            templates=get_templates(self.language),
+            max_retry=max_retry,
+            wait_time=wait_time
+        )
+
+        logger.info("Start generating markdown nodes...")
+
+        self.nodes: List[MarkdownNode] = extract_nodes(self.markdown_content, self.max_tokens_per_node, self.tokenizer)
+        if self.improve_table_split:
+            self.nodes = improve_table_split(self.markdown_content, self.nodes)
+        
+        self.line2node: List[MarkdownNode] = []
+        for node in self.nodes:
+            for line in range(node.line_start, node.line_end):
+                self.line2node[line] = node
+
+
+        logger.info(f"Node generation finished, total {len(self.nodes)} nodes")
+        logger.info("Start generating index")
+
+        self.index: List[Dict[str, Any]] = []
+
+        node_summaries = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
+            futures = [
+                executor.submit(
+                    self.llm_ops.retrieve_index,
+                    node.full_title() + "\n" + node.text
+                ) for node in self.nodes]
+            for future in futures:
+                node_summaries.append(future.result())
+            for i, summary in enumerate(node_summaries):
+                self.index.append({
+                    "node_id": i,
+                    "full_title": self.nodes[i].full_title(),
+                    "summary": summary,
+                })
+        
+        self.index_str: str = json.dumps(self.index, ensure_ascii=False, indent=2)
+
+        logger.info(f"Index generation finished, index length: {len(self.tokenizer.encode(self.index_str).ids)}")
+
+
+    def retrieve_index(self, query: str) -> List[Dict[str, Any]]:
+        n_index_segments = len(self.tokenizer.encode(self.index_str).ids) // self.index_max_part + 1
+        n_nodes_per_segment = len(self.nodes) // n_index_segments + 1
+        
+        retrieved_ids = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
+            futures = [
+                executor.submit(
+                    self.llm_ops.retrieve_index,
+                    query,
+                    json.dumps(self.index[i*n_nodes_per_segment: (i+1) * n_nodes_per_segment], ensure_ascii=False, indent=2)
+                ) for i in range(n_index_segments)
+            ]
+            for future in futures:
+                retrieved_ids.extend(future.result())
+
+        return retrieved_ids
+    
+
+    def retrieve_block(self, query: str, block_ids: List[int]) -> List[str]:
+        pass
