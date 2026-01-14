@@ -1,11 +1,65 @@
 from dataclasses import dataclass
-
-from textwrap import dedent
-
+from typing import List, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_random
 
-from markdown_index.utils import LLMChat
+from textwrap import dedent
+import json
+from jsonschema import validate, ValidationError
+
+from markdown_index.chat import LLMChat
 from markdown_index.utils import extract_json_object
+
+
+# JSON Schemas for validation
+TEXT_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"}
+    },
+    "required": ["summary"],
+    "additionalProperties": False
+}
+
+TEXT_KEYWORDS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "keyword": {"type": "string"},
+            "synonyms": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
+        "required": ["keyword", "synonyms"],
+        "additionalProperties": False
+    }
+}
+
+RETRIEVE_INDEX_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "related_block_ids": {
+            "type": "array",
+            "items": {"type": "integer"}
+        }
+    },
+    "required": ["related_block_ids"],
+    "additionalProperties": False
+}
+
+RETRIEVE_BLOCK_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "block_id": {"type": "string"},
+            "related_text": {"type": "string"}
+        },
+        "required": ["block_id", "related_text"],
+        "additionalProperties": False
+    }
+}
 
 
 class TextSummaryPromptTemplate:
@@ -13,20 +67,17 @@ class TextSummaryPromptTemplate:
         raise NotImplementedError()
 
 class TextKeywordsPromptTemplate:
-    def __call__(self, content: str) -> list[str]:
+    def __call__(self, content: str) -> list[Dict[str, Any]]:
         raise NotImplementedError()
 
 class RetrieveIndexPromptTemplate:
-    def __call__(self, query: str, index: str) -> list[int]:
+    def __call__(self, query: str, index: List[Dict[str, Any]]) -> list[int]:
         raise NotImplementedError()
 
 class RetrieveBlockPromptTemplate:
     def __call__(self, query: str) -> list[str]:
         raise NotImplementedError()
 
-class RetrieveContentPromptTemplate:
-    def __call__(self, query: str) -> list[str]:
-        raise NotImplementedError()
 
 @dataclass
 class Templates:
@@ -34,7 +85,6 @@ class Templates:
     text_keywords_prompt_template: TextKeywordsPromptTemplate
     retrieve_index_prompt_template: RetrieveIndexPromptTemplate
     retrieve_block_prompt_template: RetrieveBlockPromptTemplate
-    retrieve_content_prompt_template: RetrieveContentPromptTemplate
 
 
 def get_templates(language: str) -> Templates:
@@ -81,26 +131,72 @@ class LLMOps:
             wait=wait_random(min=1, max=self.wait_time)
         )(self._retrieve_block)
 
-        self.retrieve_content = retry(
-            stop=stop_after_attempt(self.max_retry), 
-            wait=wait_random(min=1, max=self.wait_time)
-        )(self._retrieve_content)
 
     def _text_summary(self, content: str) -> str:
         prompt = self.templates.text_summary_prompt_template(content)
-        summary = extract_json_object(self.chat(prompt))["summary"]
+        result = extract_json_object(self.chat(prompt))
+        
+        # Validate JSON schema
+        try:
+            validate(instance=result, schema=TEXT_SUMMARY_SCHEMA)
+        except ValidationError as e:
+            raise ValueError(f"Invalid JSON schema for text_summary: {e.message}")
+        
+        summary = result["summary"]
         return str(summary)
 
-    def _text_keywords(self, content: str) -> list[str]:
+    def _text_keywords(self, content: str) -> list[Dict[str, Any]]:
         prompt = self.templates.text_keywords_prompt_template(content)
-        return self.chat(prompt).split(" ")
+        keywords = extract_json_object(self.chat(prompt), is_list=True)
+        
+        # Validate JSON schema
+        try:
+            validate(instance=keywords, schema=TEXT_KEYWORDS_SCHEMA)
+        except ValidationError as e:
+            raise ValueError(f"Invalid JSON schema for text_keywords: {e.message}")
+        
+        for keyword_obj in keywords:
+            all_synonys = [keyword_obj["keyword"]] + keyword_obj["synonyms"]
+            deduplicated_synonys = []
+            for synonym in all_synonys:
+                is_duplicate = False
+                for deduplicated_synonym in deduplicated_synonys:
+                    if (deduplicated_synonym in synonym):
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    deduplicated_synonys.append(synonym)
+            deduplicated_synonys.remove(keyword_obj["keyword"])
+            keyword_obj["synonyms"] = deduplicated_synonys
+        return keywords
 
-    def _retrieve_index(self, query: str) -> list[int]:
-        prompt = self.templates.retrieve_index_prompt_template(query)
+
+    def _retrieve_index(self, query: List[Dict[str, Any]]) -> list[int]:
+        prompt = self.templates.retrieve_index_prompt_template(
+            query, json.dumps(query, ensure_ascii=False, indent=2)
+        )
+        result = extract_json_object(self.chat(prompt), is_list=False)
+        
+        # Validate JSON schema
+        try:
+            validate(instance=result, schema=RETRIEVE_INDEX_SCHEMA)
+        except ValidationError as e:
+            raise ValueError(f"Invalid JSON schema for retrieve_index: {e.message}")
+        
+        return result["related_block_ids"]
 
 
-    def _retrieve_block(self, query: str) -> list[str]:
-        prompt = self.templates.retrieve_block_prompt_template(query)
+    def _retrieve_block(self, query: str, block_list: str) -> list[str]:
+        prompt = self.templates.retrieve_block_prompt_template(
+            query, json.dumps(block_list, ensure_ascii=False, indent=2)
+        )
+        result = extract_json_object(self.chat(prompt), is_list=True)
+        
+        # Validate JSON schema
+        try:
+            validate(instance=result, schema=RETRIEVE_BLOCK_SCHEMA)
+        except ValidationError as e:
+            raise ValueError(f"Invalid JSON schema for retrieve_block: {e.message}")
+        
+        return result
 
-    def _retrieve_content(self, query: str) -> list[str]:
-        prompt = self.templates.retrieve_content_prompt_template(query)

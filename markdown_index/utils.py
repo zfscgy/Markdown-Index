@@ -58,7 +58,7 @@ def get_table_ranges(markdown_content: str) -> List[Tuple[int, int]]:
     return table_ranges
 
 
-def extract_json_object(llm_response: str) -> dict:
+def extract_json_object(llm_response: str, is_list: bool = False) -> dict:
     # Try to extract JSON directly
     try:
         return json.loads(llm_response)
@@ -75,25 +75,46 @@ def extract_json_object(llm_response: str) -> dict:
     except (IndexError, json.JSONDecodeError):
         pass
 
-    # Try to mannually find JSON content enclosed by { ... } (support nested)
-    try:
-        json_level = 0
-        json_start = None
-        json_end = None
-        for i, char in enumerate(llm_response):
-            if char == "{":
-                json_level += 1
-                if json_level == 1:
-                    json_start = i
+    if not is_list:
+        # Try to mannually find JSON content enclosed by { ... } (support nested)
+        try:
+            json_level = 0
+            json_start = None
+            json_end = None
+            for i, char in enumerate(llm_response):
+                if char == "{":
+                    json_level += 1
+                    if json_level == 1:
+                        json_start = i
 
-            elif char == "}":
-                json_level -= 1
-                if json_level == 0:
-                    json_end = i
-                    break
-        json_content = llm_response[json_start:json_end + 1]
-        return json.loads(json_content)
-    except (json.JSONDecodeError):
-        pass
+                elif char == "}":
+                    json_level -= 1
+                    if json_level == 0:
+                        json_end = i
+                        break
+            json_content = llm_response[json_start:json_end + 1]
+            return json.loads(json_content)
+        except (json.JSONDecodeError):
+            pass
+    else:  # is list
+        try:
+            json_level = 0
+            json_start = None
+            json_end = None
+            for i, char in enumerate(llm_response):
+                if char == "[":
+                    json_level += 1
+                    if json_level == 1:
+                        json_start = i
+
+                elif char == "]":
+                    json_level -= 1
+                    if json_level == 0:
+                        json_end = i
+                        break
+            json_content = llm_response[json_start:json_end + 1]
+            return json.loads(json_content)
+        except (json.JSONDecodeError):
+            pass
 
     raise ValueError(f"Failed to extract JSON object from LLM response: {llm_response}")
