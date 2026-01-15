@@ -109,7 +109,7 @@ def extract_nodes(
             # Max i = node.line_end + 1 and we use i - 1 for the current_end_index, which is at max node.line_end
             for i in range(start_line + 1, node.line_end + 1 + 1):
                 current_end_index = i
-                if self._count_tokens("\n".join(markdown_lines[start_line:i])) > max_tokens_per_node:
+                if len(tokenizer.encode("\n".join(markdown_lines[start_line:i])).ids) > max_tokens_per_node:
                     text_overflow = True
                     break
             # A single line (first line) is already too large
@@ -143,7 +143,7 @@ def extract_nodes(
         splitted_nodes: Dict[MarkdownNode, List[MarkdownNode]] = {}
         for node in nodes:
             # If the node text is within the limit, continue
-            if self._count_tokens(node.text) <= max_tokens_per_node:
+            if len(tokenizer.encode(node.text).ids) <= max_tokens_per_node:
                 continue
             splitted_nodes[node] = split_node(node)
 
@@ -159,7 +159,7 @@ def extract_nodes(
     return nodes
 
 
-def improve_table_split(markdown_content: str, nodes: List[MarkdownNode], table_ranges: List[Tuple[int, int]] = None) -> List[MarkdownNode]:
+def smart_table_split(markdown_content: str, nodes: List[MarkdownNode], table_ranges: List[Tuple[int, int]] = None) -> List[MarkdownNode]:
     table_ranges = table_ranges or get_table_ranges(markdown_content)
     for i, node in enumerate(nodes):
         # Check if any node contains splitted table
@@ -242,19 +242,19 @@ class MarkdownIndex:
         markdown_content: str,
         
         openai_model_name: str,
-        openai_base_url: str,
-        openai_api_key: str,
+        openai_base_url: str = None,
+        openai_api_key: str = None,
         openai_timeout: float = 1000,
         llm_parallel_workers: int = 10,
 
-        tokenizer: str = "default",
+        tokenizer_name: str = "default",
         language: str = "en",
 
         index_json: str = None,
         max_tokens_per_node: Optional[int]=None,
         improve_table_split: bool = True,
 
-        summary_words: int = 50,
+        n_summary_words: int = 50,
         approx_max_input_tokens: int = 8000,
 
         approx_keyword_result_size: int = 500,
@@ -272,10 +272,13 @@ class MarkdownIndex:
         self.llm_parallel_workers = llm_parallel_workers
 
         self.max_tokens_per_node = max_tokens_per_node
+        self.improve_table_split = improve_table_split
+
+        self.n_summary_words = n_summary_words
         self.approx_max_input_tokens = approx_max_input_tokens
         self.approx_keyword_result_size = approx_keyword_result_size
 
-        self.tokenizer = tokenizer
+        self.tokenizer = get_tokenizer(tokenizer_name)
         self.language = language
         
         self.chat = LLMChat(
@@ -302,7 +305,7 @@ class MarkdownIndex:
 
             self.nodes: List[MarkdownNode] = extract_nodes(self.markdown_content, self.max_tokens_per_node, self.tokenizer)
             if self.improve_table_split:
-                self.nodes = improve_table_split(self.markdown_content, self.nodes)
+                self.nodes = smart_table_split(self.markdown_content, self.nodes)
 
             logger.info(f"Node generation finished, total {len(self.nodes)} nodes")
             logger.info("Start generating index")
@@ -310,15 +313,16 @@ class MarkdownIndex:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
                 futures = [
                     executor.submit(
-                        self.llm_ops.retrieve_index,
-                        node.full_title() + "\n" + node.text
+                        self.llm_ops.text_summary,
+                        node.full_title() + "\n" + node.text,
+                        self.n_summary_words,
                     ) for node in self.nodes]
                 for future in futures:
                     node_summaries.append(future.result())
                 for i, summary in enumerate(node_summaries):
                     self.nodes[i].set_summary(summary)
 
-            logger.info(f"Index generation finished, number of nodes: {self._count_tokens(self.index_str)}")
+            logger.info(f"Index generation finished, number of nodes: {len(self.nodes)}")
         
         else:
             logger.info("Load index from json file...")
@@ -326,16 +330,28 @@ class MarkdownIndex:
             logger.info(f"Index loaded, number of nodes: {len(self.nodes)}")
 
         logger.info("Start generating line to node mapping...")
-        self.line2node: List[MarkdownNode] = []
+        self.line2node: List[MarkdownNode] = [None for _ in range(len(self.markdown_lines))]
         for node in self.nodes:
             for line in range(node.line_start, node.line_end):
                 self.line2node[line] = node
+    
+        self.index = [{
+            "title": node.full_title(),
+            "summary": node.summary
+        } for node in self.nodes]
+
+        logger.info(f"Index generation finished, size {self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2))} tokens")
+
+
+
+    def serialize_index(self) -> str:
+        return nodes2json(self.nodes)
 
     def _count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text).ids)
 
     def retrieve_index(self, query: str) -> List[Dict[str, Any]]:
-        n_index_segments = len(self.tokenizer.encode(self.index_str).ids) // self.index_max_part + 1
+        n_index_segments = self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2)) // self.index_max_part + 1
         n_nodes_per_segment = len(self.nodes) // n_index_segments + 1
         
         retrieved_ids = []
@@ -378,7 +394,7 @@ class MarkdownIndex:
         if current_block_list:
             block_lists.append(current_block_list)
 
-        retrieved_senteces = []
+        retrieved_texts = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
             futures = [
                 executor.submit(
@@ -388,11 +404,13 @@ class MarkdownIndex:
                 ) for block_list in block_lists
             ]
             for future in futures:
-                retrieved_senteces.extend(future.result())
+                retrieved_texts.extend(future.result())
+                # Append summary to the retrieve result
+                retrieved_texts[-1]["summary"] = self.nodes[block_lists[-1]["block_id"]].summary
         
-        logger.info(f"Block retrieval finished, retrieved {len(retrieved_senteces)} sentences")
+        logger.info(f"Block retrieval finished, retrieved {len(retrieved_texts)} sentences")
 
-        return retrieved_senteces
+        return retrieved_texts
     
     def _compute_match_score(self, keywords: Dict[str, Any], line: str) -> float:
         occurences = []
@@ -418,7 +436,8 @@ class MarkdownIndex:
         line_matching_scores = [self._compute_match_score(keywords, line) for line in self.markdown_lines]
         sorted_line_indices = np.argsort(line_matching_scores)[::-1]
         extracted_lines = [sorted_line_indices[i] for i in range(len(sorted_line_indices)) if line_matching_scores[sorted_line_indices[i]] > 0]
-        extracted_nodes = [self.line2node[line] for line in extracted_lines]
+        extracted_nodes: List[MarkdownNode] = [self.line2node[line] for line in extracted_lines]
+        extracted_blocks = []
 
         # Try to expand each line
         for line_number, node in zip(extracted_lines, extracted_nodes):
@@ -430,6 +449,19 @@ class MarkdownIndex:
                 if self._count_tokens("\n".join(extracted_lines)) > self.approx_max_input_tokens:
                     break
                 n_expand_lines += 1
+                 
+            # If in table and table header is not included
+            for table_start, table_end in self.table_ranges:
+                if line_number < table_end and line_number - n_expand_lines > table_start:
+                    n_header_lines = max(line_number - n_expand_lines - table_start, 2)
+                    n_header_lines = "\n".join(self.markdown_lines[table_start: table_start + n_header_lines]) + "\n"
+                    extracted_lines = [n_header_lines] + extracted_lines
+                    break
+            
+            extracted_blocks.append({
+                "block_id": node.id,
+                "summary": node.summary,
+                "text": "\n".join(extracted_lines)
+            })
         
-        # If in table and table header is not included
-        
+        return extracted_blocks

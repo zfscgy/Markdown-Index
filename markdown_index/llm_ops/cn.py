@@ -19,14 +19,15 @@ cn_templates = Templates(
         下面是文档的内容：
         ---------------
         ```text
-        """) + content + dedent(f"""\
+        """) + content + dedent(f"""
         ```
         """),
 
     text_keywords_prompt_template = lambda query: dedent(f"""\
         你需要根据用户的查询请求提取关键词，关键词应该准确归纳用户的查询意图，并且可以用于后续的检索中。
-        注意：关键词列表应该尽可能全面。
-        此外，为了防止某些同义词无法被正确检索，你需要考虑关键词是否存在一些同义词，若有的话需要将同义词也返回。
+        注意：关键词列表应该尽可能全面，并且单个关键词不要太长，在不影响语义/语义接近的情况下选取词的主要部分，避免出现检索失败的情况。
+        比如："神经网络理论" 可以提取出 "神经网络"、"DNN" 、"深度学习"等，因为完整的"神经网络理论"可能无法匹配到目标内容。
+        此外，为了防止某些同义词无法被正确检索，你需要考虑关键词是否存在一些同义词/非常相近的近义词，若有的话需要将同义词/近义词也返回。
         注意，除了一些姓名或专有名词，同义词无需包含该关键词在其他语言中的翻译。
         【输出要求】：请按照示例中的JSON格式返回，不要返回任何其他文本、话语或格式符号。
         【示例】：
@@ -36,7 +37,7 @@ cn_templates = Templates(
         [
             {{
                 "keyword": "爱因斯坦",
-                "synonyms": ["Einstein"]
+                "synonyms": ["Einstein", "艾因斯坦"]
             }},
             {{
                 "keyword": "相对论",
@@ -44,7 +45,7 @@ cn_templates = Templates(
             }},
             {{
                 "keyword": "量子力学",
-                "synonyms": ["量子物理", "量子理论"]
+                "synonyms": ["量子", "量子物理", "量子理论"]
             }} 
         ]
         ```
@@ -52,7 +53,7 @@ cn_templates = Templates(
         下面是用户的查询请求：
         ------------------
         ```text
-        """) + query + dedent("""\
+        """) + query + dedent("""
         ```
         """),
 
@@ -77,7 +78,7 @@ cn_templates = Templates(
         下面是用户的查询请求：
         ------------------
         ```text
-        """) + query + dedent("""\
+        """) + query + dedent("""
         ```
         """),
 
@@ -103,15 +104,13 @@ cn_templates = Templates(
        下面是用户的查询请求：
         ------------------
         ```text
-        """) + query + dedent("""\
+        """) + query + dedent("""
         ```
 
         下面是文档片段的列表：
         ------------------
         ```json
-        """) + block_list + dedent("""\
+        """) + block_list + dedent("""
         ```
-        """),
-
-    retrieve_content_prompt_template = None,
+        """)
 )

@@ -132,8 +132,11 @@ class LLMOps:
         )(self._retrieve_block)
 
 
-    def _text_summary(self, content: str) -> str:
-        prompt = self.templates.text_summary_prompt_template(content)
+    def _text_summary(self, content: str, n_summary_words: int) -> str:
+        # Content is short, do not summary
+        if len(content) <= n_summary_words:
+            return content
+        prompt = self.templates.text_summary_prompt_template(content, n_summary_words)
         result = extract_json_object(self.chat(prompt))
         
         # Validate JSON schema

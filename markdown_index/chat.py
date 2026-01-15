@@ -1,16 +1,19 @@
+import os
+
 from openai import OpenAI
 
 
 class LLMChat:
-    def __init__(self, model: str, api_key: str, api_base: str, timeout: float = 1000):
-        self.client = OpenAI(api_key=api_key, base_url=api_base)
+    def __init__(self, model: str, api_key: str = None, base_url: str = None, timeout: float = 1000):
+        self.client = OpenAI(
+            api_key=api_key or os.getenv("OPENAI_API_KEY"), 
+            base_url=base_url or os.getenv("OPENAI_BASE_URL"),
+            timeout=timeout)
         self.model = model
-        self.timeout = timeout
 
     def __call__(self, prompt: str) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=self.timeout
+            messages=[{"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content
