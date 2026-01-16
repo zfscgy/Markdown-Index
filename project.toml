@@ -1,5 +1,0 @@
-[tool.setuptools]
-# package-dir = {"" = "markdown_index"} # Removed incorrect package-dir mapping
-
-[tool.setuptools.package-data]
-markdown_index = ["tokenizer_files/*"]

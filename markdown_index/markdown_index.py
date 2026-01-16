@@ -1,6 +1,8 @@
 from typing import Self, Optional, List, Dict, Tuple, Any
 
 import logging
+
+from attr import dataclass
 logger = logging.getLogger(__name__)
 
 import concurrent.futures
@@ -235,64 +237,69 @@ def json2nodes(json_str: str) -> List[MarkdownNode]:
     return nodes
 
 
+@dataclass
+class LLMConfig:
+    openai_model_name: str
+    openai_base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_timeout: float = 1000
+    parallel_requests: int = 10
+    tokenizer_name: str = "default"
+    approx_max_input_tokens: int = 8000
+
+
+@dataclass
+class IndexConfig:
+    max_tokens_per_node: Optional[int]=3000
+    improve_table_split: bool = True
+    n_summary_words: int = 50
+    approx_keyword_result_size: int = 500
+
+
+@dataclass
+class RetryConfig:
+    max_retry: int = 3
+    wait_time: float = 10
+
+
 class MarkdownIndex:
     def __init__(
         self,
 
         markdown_content: str,
-        
-        openai_model_name: str,
-        openai_base_url: str = None,
-        openai_api_key: str = None,
-        openai_timeout: float = 1000,
-        llm_parallel_workers: int = 10,
-
-        tokenizer_name: str = "default",
-        language: str = "en",
-
         index_json: str = None,
-        max_tokens_per_node: Optional[int]=None,
-        improve_table_split: bool = True,
+        language: str = None,
 
-        n_summary_words: int = 50,
-        approx_max_input_tokens: int = 8000,
+        llm_config: LLMConfig = None ,
+        index_config: Optional[IndexConfig] = None,
+        retry_config: Optional[RetryConfig] = None,
 
-        approx_keyword_result_size: int = 500,
-
-        max_retry: int = 3,
-        wait_time: float = 10
     ):
+        index_config = index_config or IndexConfig()
+        retry_config = retry_config or RetryConfig()
+
         self.markdown_content = markdown_content
         self.markdown_lines = markdown_content.split("\n")
 
-        self.openai_model_name = openai_model_name
-        self.openai_base_url = openai_base_url
-        self.openai_api_key = openai_api_key
-        self.openai_timeout = openai_timeout
-        self.llm_parallel_workers = llm_parallel_workers
+        self.llm_config = llm_config
+        self.index_config = index_config
+        self.retry_config = retry_config
 
-        self.max_tokens_per_node = max_tokens_per_node
-        self.improve_table_split = improve_table_split
-
-        self.n_summary_words = n_summary_words
-        self.approx_max_input_tokens = approx_max_input_tokens
-        self.approx_keyword_result_size = approx_keyword_result_size
-
-        self.tokenizer = get_tokenizer(tokenizer_name)
+        self.tokenizer = get_tokenizer(self.llm_config.tokenizer_name)
         self.language = language
         
         self.chat = LLMChat(
-            model=self.openai_model_name,
-            base_url=self.openai_base_url,
-            api_key=self.openai_api_key,
-            timeout=self.openai_timeout
+            model=self.llm_config.openai_model_name,
+            base_url=self.llm_config.openai_base_url,
+            api_key=self.llm_config.openai_api_key,
+            timeout=self.llm_config.openai_timeout
         )
 
         self.llm_ops = LLMOps(
             chat=self.chat,
             templates=get_templates(self.language),
-            max_retry=max_retry,
-            wait_time=wait_time
+            max_retry=self.retry_config.max_retry,
+            wait_time=self.retry_config.wait_time
         )
 
         logger.info("Extract table ranges...")
@@ -303,23 +310,31 @@ class MarkdownIndex:
             logger.info("No index_json passed, will generate index from markdown string...")
             logger.info("Start generating markdown nodes...")
 
-            self.nodes: List[MarkdownNode] = extract_nodes(self.markdown_content, self.max_tokens_per_node, self.tokenizer)
-            if self.improve_table_split:
+            self.nodes: List[MarkdownNode] = extract_nodes(
+                self.markdown_content,
+                self.index_config.max_tokens_per_node,
+                self.tokenizer,
+            )
+            if self.index_config.improve_table_split:
                 self.nodes = smart_table_split(self.markdown_content, self.nodes)
 
             logger.info(f"Node generation finished, total {len(self.nodes)} nodes")
             logger.info("Start generating index")
             node_summaries = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
-                futures = [
-                    executor.submit(
-                        self.llm_ops.text_summary,
-                        node.full_title() + "\n" + node.text,
-                        self.n_summary_words,
-                    ) for node in self.nodes]
+
+            def summary_worker(node: MarkdownNode):
+                if node.text.strip() == node.title:
+                    return ""
+                elif self._count_tokens(node.text) <= self.index_config.n_summary_words:
+                    return node.text.removeprefix(node.title).strip()
+                else:
+                    return self.llm_ops.text_summary(node.full_title() + "\n" + node.text, self.index_config.n_summary_words)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_config.parallel_requests) as executor:
+                futures = [executor.submit(summary_worker, node) for node in self.nodes]
                 for future in futures:
                     node_summaries.append(future.result())
-                for i, summary in enumerate(node_summaries):
+                for i, summary in zip(range(len(self.nodes)), node_summaries):
                     self.nodes[i].set_summary(summary)
 
             logger.info(f"Index generation finished, number of nodes: {len(self.nodes)}")
@@ -335,10 +350,7 @@ class MarkdownIndex:
             for line in range(node.line_start, node.line_end):
                 self.line2node[line] = node
     
-        self.index = [{
-            "title": node.full_title(),
-            "summary": node.summary
-        } for node in self.nodes]
+        self.index = [f"ID={i} {node.full_title()}({node.summary}) {node.line_start}-{node.line_end}" for i, node in enumerate(self.nodes)]
 
         logger.info(f"Index generation finished, size {self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2))} tokens")
 
@@ -351,11 +363,11 @@ class MarkdownIndex:
         return len(self.tokenizer.encode(text).ids)
 
     def retrieve_index(self, query: str) -> List[Dict[str, Any]]:
-        n_index_segments = self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2)) // self.index_max_part + 1
+        n_index_segments = self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2)) // self.llm_config.approx_max_input_tokens + 1
         n_nodes_per_segment = len(self.nodes) // n_index_segments + 1
         
         retrieved_ids = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_config.parallel_requests) as executor:
             futures = [
                 executor.submit(
                     self.llm_ops.retrieve_index,
@@ -381,7 +393,7 @@ class MarkdownIndex:
         current_block_list = []
         for block in block_contents:
             estimated_block_list_size = self._count_tokens(json.dumps(current_block_list + [block], ensure_ascii=False, indent=2))
-            if estimated_block_list_size > self.approx_max_input_tokens:
+            if estimated_block_list_size > self.llm_config.approx_max_input_tokens:
                 if len(current_block_list) > 0:
                     error_message = f"Single block size exceeds the limit, block id: {current_block_list[-1]['block_id']}"
                     logger.error(error_message)
@@ -395,7 +407,7 @@ class MarkdownIndex:
             block_lists.append(current_block_list)
 
         retrieved_texts = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_parallel_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.llm_config.parallel_requests) as executor:
             futures = [
                 executor.submit(
                     self.llm_ops.retrieve_block,
@@ -446,7 +458,7 @@ class MarkdownIndex:
                 if line_number - n_expand_lines < node.line_start and line_number + n_expand_lines + 1 >= node.line_end:
                     break
                 extracted_lines = self.markdown_lines[line_number - n_expand_lines: line_number + n_expand_lines + 1]
-                if self._count_tokens("\n".join(extracted_lines)) > self.approx_max_input_tokens:
+                if self._count_tokens("\n".join(extracted_lines)) > self.llm_config.approx_max_input_tokens:
                     break
                 n_expand_lines += 1
                  
