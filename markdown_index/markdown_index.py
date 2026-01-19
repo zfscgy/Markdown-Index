@@ -1,10 +1,11 @@
-from typing import Self, Optional, List, Dict, Tuple, Any
+from typing import Any, Self, Optional, List, Dict, Tuple, Union
 
 import logging
-
-from attr import dataclass
 logger = logging.getLogger(__name__)
 
+from dataclasses import dataclass
+from pydantic import BaseModel
+from functools import cache
 import concurrent.futures
 
 import json
@@ -12,208 +13,64 @@ import numpy as np
 
 from tokenizers import Tokenizer
 
+from markdown_index.markdown_node import MarkdownNode, extract_nodes, smart_table_split
 from markdown_index.utils import get_tokenizer, get_table_ranges
 from markdown_index.chat import LLMChat
 from markdown_index.llm_ops.base import LLMOps, get_templates
 
 
-class MarkdownNode:
-    def __init__(
-        self,
-        title: str, 
-        line_start: int, 
-        line_end: int, 
-        text: str,
-        parent: Optional[Self] = None,
-        is_forced_split: bool = False,
-    ):
-        self.title: str = title
-        self.line_start: str = line_start
-        self.line_end: str = line_end
-        self.text: str = text
-        self.parent: Optional[Self] = parent
-        self.summary: Optional[str] = None
 
-        self.level: int = (len(self.title) - len(self.title.lstrip('#'))) or 999
-        self.is_forced_split: bool = is_forced_split
-
-    def full_title(self):
-        title = self.title.lstrip("#")
-        if self.parent is not None:
-            title = self.parent.full_title() + " > " + title.lstrip("#")
-        return title
-    
-    def set_summary(self, summary: str):
-        self.summary = summary
+class MarkdownNodeData(BaseModel):
+    title: str
+    line_start: int
+    line_end: int
+    text: str
+    parent_idx: Optional[int] = None
+    is_forced_split: bool = False
+    summary: Optional[str] = None
 
 
-def extract_nodes(
-    markdown_content: str, 
-    max_tokens_per_node: Optional[int]=None, 
-    tokenizer: Tokenizer = get_tokenizer("default")
-) -> list[MarkdownNode]:
-    markdown_lines = markdown_content.split('\n')
-    nodes: List[MarkdownNode] = []
-
-    current_node_start = 0
-    with_in_code_segment: bool = False
-
-    for i, line in enumerate(markdown_lines):
-        # If the text is inside the code segment, skip this
-        if line.startswith('```'):
-            with_in_code_segment = not with_in_code_segment
-            continue
-        if with_in_code_segment:
-            continue
-        # A new node is encountered
-        if line.startswith('#'):
-            # The previous node should be created
-            nodes.append(MarkdownNode(
-                # If the first line is not a header, title is None
-                title=markdown_lines[current_node_start] if markdown_lines[current_node_start].startswith('#') else "Start of Document",
-                line_start=current_node_start,
-                line_end=i,
-                text="\n".join(markdown_lines[current_node_start:i]) + "\n",
-            ))
-            current_node_start = i
-    
-    # The last node
-    nodes.append(MarkdownNode(
-        title=markdown_lines[current_node_start],
-        line_start=current_node_start,
-        line_end=len(markdown_lines),
-        text="\n".join(markdown_lines[current_node_start:]),
-    ))
+class MarkdownIndexData(BaseModel):
+    markdown_content: str
+    doc_summary: str
+    nodes: List[MarkdownNodeData]
 
 
-    current_parent_node = None
-    for node in nodes:
-        # Where the node is in top-level
-        if current_parent_node is None:
-            current_parent_node = node
-            continue
-        else:
-            # Find the actual parent node
-            while (current_parent_node is not None) and (node.level <= current_parent_node.level):
-                current_parent_node = current_parent_node.parent
 
-        node.parent = current_parent_node
-        current_parent_node = node
-
-
-    def split_node(node: MarkdownNode) -> List[MarkdownNode]:
-        splitted_nodes: List[MarkdownNode] = []
-        start_line = node.line_start
-
-        while start_line < node.line_end:
-            text_overflow = False
-            # Iterate the end-line until the node is too large
-            # Max i = node.line_end + 1 and we use i - 1 for the current_end_index, which is at max node.line_end
-            for i in range(start_line + 1, node.line_end + 1 + 1):
-                current_end_index = i
-                if len(tokenizer.encode("\n".join(markdown_lines[start_line:i])).ids) > max_tokens_per_node:
-                    text_overflow = True
-                    break
-            # A single line (first line) is already too large
-            if current_end_index == start_line + 1 and text_overflow: 
-                logging.warning(f"Line {start_line} is already beyond the node limit, direct truncation is applied")
-                splitted_nodes.append(MarkdownNode(
-                    title=node.title + f"(part-{len(splitted_nodes) + 1})",
-                    line_start=start_line,
-                    line_end=current_end_index,
-                    text=tokenizer.decode(tokenizer.encode(markdown_lines[start_line]).ids[:max_tokens_per_node]),
-                    parent=node.parent,
-                    is_forced_split=True,
-                ))
-                start_line = current_end_index
-            else:
-                splitted_nodes.append(MarkdownNode(
-                    title=node.title + f"(part-{len(splitted_nodes) + 1})",
-                    line_start=start_line,
-                    line_end=current_end_index - 1,
-                    text="\n".join(markdown_lines[start_line:current_end_index - 1]) + "\n",
-                    parent=node.parent,
-                    is_forced_split=True
-                ))
-                start_line = current_end_index - 1
-
-        return splitted_nodes
-
-
-    # If we wanna split some "heavy" nodes
-    if max_tokens_per_node is not None:
-        splitted_nodes: Dict[MarkdownNode, List[MarkdownNode]] = {}
-        for node in nodes:
-            # If the node text is within the limit, continue
-            if len(tokenizer.encode(node.text).ids) <= max_tokens_per_node:
-                continue
-            splitted_nodes[node] = split_node(node)
-
-        for full_node in splitted_nodes:
-            parent_node_idx = nodes.index(full_node)
-            for idx, splitted_node in enumerate(splitted_nodes[full_node]):
-                nodes.insert(parent_node_idx + idx + 1, splitted_node)
-            nodes.remove(full_node)  # Delete the "full node"
-        
-        if nodes[-1].is_forced_split:  # Split will add an extra "\n" to the last node
-            nodes[-1].text = nodes[-1].text.removesuffix("\n")
-
-    return nodes
-
-
-def smart_table_split(markdown_content: str, nodes: List[MarkdownNode], table_ranges: List[Tuple[int, int]] = None) -> List[MarkdownNode]:
-    table_ranges = table_ranges or get_table_ranges(markdown_content)
-    for i, node in enumerate(nodes):
-        # Check if any node contains splitted table
-        for table_start, table_end in table_ranges:
-            # The node only contains part of the table (the header is missed!)
-            if node.line_start > table_start and node.line_start < table_end:
-                # The header first line is in the previous node, i.e.,
-                # | col1 | col2 | col3 |
-                if node.line_start == table_start + 1:
-                    table_first_line = nodes[i-1].text.split("\n")[-1] + "\n"
-                    node.text = table_first_line + node.text
-                    nodes[i-1].text = nodes[i-1].text.removesuffix(table_first_line)
-                # Previous node only contain the first two lines of the table, i.e.,
-                # | col1 | col2 | col3 |
-                # |------|------|------|
-                elif node.line_start == table_start + 2:
-                    table_first_two_lines = "\n".join(nodes[i-1].text.split("\n")[-2:]) + "\n"
-                    node.text = table_first_two_lines + node.text
-                    nodes[i-1].text = nodes[i-1].text.removesuffix(table_first_two_lines)
-                # Previous node also contains some of the table's main body
-                # Just copy the table header to the next node
-                else:
-                    table_first_two_lines = "\n".join(nodes[i-1].text.split("\n")[-2:]) + "\n"
-                    node.text = table_first_two_lines + node.text
-                # One node could only miss one table header
-                break
-
-    return nodes
-
-
-def nodes2json(nodes: List[MarkdownNode]) -> str:
+def nodes_to_node_data(nodes: List[MarkdownNode]) -> List[MarkdownNodeData]:
     node_to_idx = {node: i for i, node in enumerate(nodes)}
     nodes_data = []
     for node in nodes:
         parent_idx = node_to_idx.get(node.parent, -1) if node.parent else -1
-        nodes_data.append({
-            "title": node.title,
-            "line_start": node.line_start,
-            "line_end": node.line_end,
-            "text": node.text,
-            "parent_idx": parent_idx,
-            "is_forced_split": node.is_forced_split,
-            "summary": node.summary
-        })
-    return json.dumps(nodes_data, ensure_ascii=False, indent=2)
+        nodes_data.append(
+            MarkdownNodeData(
+                title=node.title,
+                line_start=node.line_start,
+                line_end=node.line_end,
+                text=node.text,
+                parent_idx=parent_idx,
+                is_forced_split=node.is_forced_split,
+                summary=node.summary,
+            )
+        )
+    return nodes_data
 
 
-def json2nodes(json_str: str) -> List[MarkdownNode]:
-    nodes_data = json.loads(json_str)
+def node_data_to_nodes(
+    nodes_data: List[MarkdownNodeData],
+) -> List[MarkdownNode]:
+    """
+    Convert serialized node data into `MarkdownNode` instances.
+    """
+
     nodes = []
     # First pass: create nodes
     for data in nodes_data:
+        if isinstance(data, MarkdownNodeData):
+            data = data.model_dump()
+        else:
+            # Validate / coerce plain dicts into the schema we persist
+            data = MarkdownNodeData.model_validate(data).model_dump()
         node = MarkdownNode(
             title=data["title"],
             line_start=data["line_start"],
@@ -227,7 +84,7 @@ def json2nodes(json_str: str) -> List[MarkdownNode]:
     
     # Second pass: link parents
     for i, data in enumerate(nodes_data):
-        parent_idx = data["parent_idx"]
+        parent_idx = data.parent_idx
         if parent_idx != -1:
             if 0 <= parent_idx < len(nodes):
                 nodes[i].parent = nodes[parent_idx]
@@ -266,8 +123,8 @@ class MarkdownIndex:
     def __init__(
         self,
 
-        markdown_content: str,
-        index_json: str = None,
+        markdown_content: str = None,
+        index_data: Union[str, Dict[str, Any], MarkdownIndexData] = None,
         language: str = None,
 
         llm_config: LLMConfig = None ,
@@ -275,16 +132,24 @@ class MarkdownIndex:
         retry_config: Optional[RetryConfig] = None,
 
     ):
+        if markdown_content is not None and index_data is not None:
+            raise ValueError("Only one of markdown_content or index_data must be provided")
+
         index_config = index_config or IndexConfig()
         retry_config = retry_config or RetryConfig()
 
         self.markdown_content = markdown_content
-        self.markdown_lines = markdown_content.split("\n")
+        
+        # Inner data members
+        self.doc_summary: str = None
+        self.nodes: List[MarkdownNode] = None
 
+        # Configurations
         self.llm_config = llm_config
         self.index_config = index_config
         self.retry_config = retry_config
 
+        # 
         self.tokenizer = get_tokenizer(self.llm_config.tokenizer_name)
         self.language = language
         
@@ -302,11 +167,7 @@ class MarkdownIndex:
             wait_time=self.retry_config.wait_time
         )
 
-        logger.info("Extract table ranges...")
-        self.table_ranges = get_table_ranges(self.markdown_content)
-        logger.info(f"Table ranges extracted, total {len(self.table_ranges)} tables")
-
-        if index_json is None:
+        if index_data is None:
             logger.info("No index_json passed, will generate index from markdown string...")
             logger.info("Start generating markdown nodes...")
 
@@ -337,33 +198,55 @@ class MarkdownIndex:
                 for i, summary in zip(range(len(self.nodes)), node_summaries):
                     self.nodes[i].set_summary(summary)
 
+            self.doc_summary = self.llm_ops.doc_summary("\n".join(self.index()), self.index_config.n_summary_words)
+
             logger.info(f"Index generation finished, number of nodes: {len(self.nodes)}")
         
         else:
             logger.info("Load index from json file...")
-            self.nodes = json2nodes(index_json)
+            if isinstance(index_data, str):
+                index_data = json.loads(index_data)
+            if isinstance(index_data, dict):
+                index_data = MarkdownIndexData.model_validate(index_data)
+            if isinstance(index_data, MarkdownIndexData):
+                self.markdown_content = index_data.markdown_content
+                self.doc_summary = index_data.doc_summary
+                self.nodes = node_data_to_nodes(index_data.nodes)
+            else:
+                raise ValueError(f"Invalid index data type: {type(index_data)}")
+
             logger.info(f"Index loaded, number of nodes: {len(self.nodes)}")
+        
+        
+        self.markdown_lines = self.markdown_content.split("\n")
+        logger.info("Extract table ranges...")
+        self.table_ranges = get_table_ranges(self.markdown_content)
+        logger.info(f"Table ranges extracted, total {len(self.table_ranges)} tables")
 
         logger.info("Start generating line to node mapping...")
         self.line2node: List[MarkdownNode] = [None for _ in range(len(self.markdown_lines))]
         for node in self.nodes:
             for line in range(node.line_start, node.line_end):
                 self.line2node[line] = node
-    
-        self.index = [f"ID={i} {node.full_title()}({node.summary}) {node.line_start}-{node.line_end}" for i, node in enumerate(self.nodes)]
 
-        logger.info(f"Index generation finished, size {self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2))} tokens")
+        logger.info(f"Index generation finished, size {self._count_tokens(json.dumps(self.index(), ensure_ascii=False, indent=2))} tokens")
 
-
+    @cache
+    def index(self) -> List[str]:
+        return [f"ID={i} {node.full_title()}({node.summary}) {node.line_start}-{node.line_end}" for i, node in enumerate(self.nodes)]
 
     def serialize_index(self) -> str:
-        return nodes2json(self.nodes)
+        return MarkdownIndexData(
+            markdown_content=self.markdown_content,
+            doc_summary=self.doc_summary,
+            nodes=nodes_to_node_data(self.nodes)
+        ).model_dump_json()
 
     def _count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text).ids)
 
     def retrieve_index(self, query: str) -> List[Dict[str, Any]]:
-        n_index_segments = self._count_tokens(json.dumps(self.index, ensure_ascii=False, indent=2)) // self.llm_config.approx_max_input_tokens + 1
+        n_index_segments = self._count_tokens(json.dumps(self.index(), ensure_ascii=False, indent=2)) // self.llm_config.approx_max_input_tokens + 1
         n_nodes_per_segment = len(self.nodes) // n_index_segments + 1
         
         retrieved_ids = []
@@ -372,7 +255,7 @@ class MarkdownIndex:
                 executor.submit(
                     self.llm_ops.retrieve_index,
                     query,
-                    self.index[i*n_nodes_per_segment: (i+1) * n_nodes_per_segment]
+                    self.index()[i*n_nodes_per_segment: (i+1) * n_nodes_per_segment]
                 ) for i in range(n_index_segments)
             ]
             for future in futures:
@@ -472,8 +355,44 @@ class MarkdownIndex:
             
             extracted_blocks.append({
                 "block_id": node.id,
+                "full_title": node.full_title(),
                 "summary": node.summary,
                 "text": "\n".join(extracted_lines)
             })
         
         return extracted_blocks
+
+
+    def search_by_index(self, query: str, n_results: int = 5):
+        retrieved_ids = self.retrieve_index(query)
+        retrieved_blocks = self.retrieve_block(query, retrieved_ids)
+        return retrieved_blocks[:n_results]
+
+    
+    def search_by_keywords(self, query: str, n_results: int = 5):
+        keywords: List[Dict[str, Any]] = self.llm_ops.text_keywords(query, self.doc_summary)
+        logger.info(f"Keywords extracted: {keywords}")
+        retrieved_blocks = self.keyword_search(keywords)
+        return retrieved_blocks[:n_results]
+
+
+    def retrieve(self, 
+        query: str, 
+        n_index_results: int, 
+        n_keyword_results: int
+    ) -> List[Dict[str, Any]]:
+        if n_index_results <= 0 and n_keyword_results <= 0:
+            raise ValueError("n_index_results and n_keyword_results cannot be both 0")
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            if n_index_results > 0:
+                future_index = executor.submit(self.search_by_index, query, n_index_results)
+            if n_keyword_results > 0:
+                future_keywords = executor.submit(self.search_by_keywords, query, n_keyword_results)
+                
+            if n_index_results > 0:
+                results['index_search_results'] = future_index.result()
+            if n_keyword_results > 0:
+                results['keyword_search_results'] = future_keywords.result()
+
+        return results

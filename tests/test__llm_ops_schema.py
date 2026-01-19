@@ -1,131 +1,130 @@
-"""Test JSON schema validation in llm_ops/base.py"""
+"""Test schema validation in llm_ops/base.py (Pydantic models)."""
 import pytest
-from jsonschema import ValidationError
-from jsonschema import validate
 
 from markdown_index.llm_ops.base import (
-    TEXT_SUMMARY_SCHEMA,
-    TEXT_KEYWORDS_SCHEMA,
-    RETRIEVE_INDEX_SCHEMA,
-    RETRIEVE_BLOCK_SCHEMA,
+    TextSummarySchema,
+    TextKeywordSchema,
+    RetrieveIndexSchema,
+    RetrieveBlockItemSchema,
 )
+from pydantic import TypeAdapter, ValidationError
 
 
 class TestTextSummarySchema:
-    """Test TEXT_SUMMARY_SCHEMA validation"""
+    """Test TextSummarySchema validation"""
     
     def test_valid_schema(self):
-        """Test valid text summary JSON"""
+        """Test valid text summary payload"""
         valid_data = {"summary": "This is a valid summary"}
-        validate(instance=valid_data, schema=TEXT_SUMMARY_SCHEMA)
+        TextSummarySchema.model_validate(valid_data)
     
     def test_missing_summary_field(self):
         """Test that missing 'summary' field raises error"""
         invalid_data = {"description": "Wrong field"}
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=TEXT_SUMMARY_SCHEMA)
+            TextSummarySchema.model_validate(invalid_data)
     
     def test_extra_field(self):
         """Test that extra fields raise error"""
         invalid_data = {"summary": "Valid", "extra": "Not allowed"}
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=TEXT_SUMMARY_SCHEMA)
+            TextSummarySchema.model_validate(invalid_data)
     
     def test_wrong_type(self):
         """Test that wrong type for summary raises error"""
         invalid_data = {"summary": 123}
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=TEXT_SUMMARY_SCHEMA)
+            TextSummarySchema.model_validate(invalid_data)
 
 
 class TestTextKeywordsSchema:
-    """Test TEXT_KEYWORDS_SCHEMA validation"""
+    """Test list[TextKeywordSchema] validation"""
     
     def test_valid_schema(self):
-        """Test valid keywords JSON"""
+        """Test valid keywords payload"""
         valid_data = [
             {"keyword": "Einstein", "synonyms": ["Albert Einstein"]},
             {"keyword": "relativity", "synonyms": []},
         ]
-        validate(instance=valid_data, schema=TEXT_KEYWORDS_SCHEMA)
+        TypeAdapter(list[TextKeywordSchema]).validate_python(valid_data)
     
     def test_missing_field(self):
         """Test that missing required fields raise error"""
         invalid_data = [{"keyword": "test"}]  # missing synonyms
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=TEXT_KEYWORDS_SCHEMA)
+            TypeAdapter(list[TextKeywordSchema]).validate_python(invalid_data)
     
     def test_wrong_synonyms_type(self):
         """Test that wrong type for synonyms raises error"""
         invalid_data = [{"keyword": "test", "synonyms": "string"}]
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=TEXT_KEYWORDS_SCHEMA)
+            TypeAdapter(list[TextKeywordSchema]).validate_python(invalid_data)
     
     def test_extra_field(self):
         """Test that extra fields raise error"""
         invalid_data = [{"keyword": "test", "synonyms": [], "extra": "field"}]
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=TEXT_KEYWORDS_SCHEMA)
+            TypeAdapter(list[TextKeywordSchema]).validate_python(invalid_data)
 
 
 class TestRetrieveIndexSchema:
-    """Test RETRIEVE_INDEX_SCHEMA validation"""
+    """Test RetrieveIndexSchema validation"""
     
     def test_valid_schema(self):
-        """Test valid retrieve index JSON"""
+        """Test valid retrieve index payload"""
         valid_data = {"related_block_ids": [1, 2, 3, 4]}
-        validate(instance=valid_data, schema=RETRIEVE_INDEX_SCHEMA)
+        RetrieveIndexSchema.model_validate(valid_data)
     
     def test_empty_list(self):
         """Test that empty list is valid"""
         valid_data = {"related_block_ids": []}
-        validate(instance=valid_data, schema=RETRIEVE_INDEX_SCHEMA)
+        RetrieveIndexSchema.model_validate(valid_data)
     
     def test_missing_field(self):
         """Test that missing field raises error"""
         invalid_data = {"blocks": [1, 2, 3]}
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=RETRIEVE_INDEX_SCHEMA)
+            RetrieveIndexSchema.model_validate(invalid_data)
     
     def test_wrong_item_type(self):
         """Test that non-integer items raise error"""
         invalid_data = {"related_block_ids": [1, "2", 3]}
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=RETRIEVE_INDEX_SCHEMA)
+            RetrieveIndexSchema.model_validate(invalid_data)
 
 
 class TestRetrieveBlockSchema:
-    """Test RETRIEVE_BLOCK_SCHEMA validation"""
+    """Test list[RetrieveBlockItemSchema] validation"""
     
     def test_valid_schema(self):
-        """Test valid retrieve block JSON"""
+        """Test valid retrieve block payload"""
         valid_data = [
-            {"block_id": "block1", "related_text": "Some text"},
-            {"block_id": "block2", "related_text": "More text"},
+            {"block_id": 1, "related_text": "Some text"},
+            {"block_id": 2, "related_text": "More text"},
         ]
-        validate(instance=valid_data, schema=RETRIEVE_BLOCK_SCHEMA)
+        TypeAdapter(list[RetrieveBlockItemSchema]).validate_python(valid_data)
     
     def test_empty_list(self):
         """Test that empty list is valid"""
         valid_data = []
-        validate(instance=valid_data, schema=RETRIEVE_BLOCK_SCHEMA)
+        TypeAdapter(list[RetrieveBlockItemSchema]).validate_python(valid_data)
     
     def test_missing_field(self):
         """Test that missing fields raise error"""
-        invalid_data = [{"block_id": "block1"}]  # missing related_text
+        invalid_data = [{"block_id": 1}]  # missing related_text
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=RETRIEVE_BLOCK_SCHEMA)
+            TypeAdapter(list[RetrieveBlockItemSchema]).validate_python(invalid_data)
     
     def test_wrong_type(self):
         """Test that wrong types raise error"""
         invalid_data = [{"block_id": 123, "related_text": "text"}]
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=RETRIEVE_BLOCK_SCHEMA)
+            TypeAdapter(list[RetrieveBlockItemSchema]).validate_python(invalid_data)
     
     def test_extra_field(self):
         """Test that extra fields raise error"""
         invalid_data = [
-            {"block_id": "block1", "related_text": "text", "extra": "field"}
+            {"block_id": 1, "related_text": "text", "extra": "field"}
         ]
         with pytest.raises(ValidationError):
-            validate(instance=invalid_data, schema=RETRIEVE_BLOCK_SCHEMA)
+            TypeAdapter(list[RetrieveBlockItemSchema]).validate_python(invalid_data)

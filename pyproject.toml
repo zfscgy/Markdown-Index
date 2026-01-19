@@ -11,11 +11,10 @@ requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
   "openai>=1.109.1",
-  "jsonschema>=4.0.0",
   "python-dotenv>=1.0.0",
   "tokenizers>=0.20.0",
   "numpy>=1.26.0",
-  "attrs>=23.0.0",
+  "pydantic>=2.11.7",
 ]
 
 
