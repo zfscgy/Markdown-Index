@@ -3,8 +3,9 @@ from typing import Tuple, List
 from importlib import resources
 
 import re
+import rapidfuzz
 import json
-
+import numpy as np
 from tokenizers import Tokenizer
 
 
@@ -118,3 +119,7 @@ def extract_json_object(llm_response: str, is_list: bool = False) -> dict:
             pass
 
     raise ValueError(f"Failed to extract JSON object from LLM response: {llm_response}")
+
+
+def fuzzy_score(text: str, word: str) -> bool:
+    return rapidfuzz.fuzz.partial_ratio(text, word) / 100

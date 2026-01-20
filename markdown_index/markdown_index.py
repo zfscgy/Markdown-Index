@@ -10,11 +10,11 @@ import concurrent.futures
 
 import json
 import numpy as np
-
+import regex as re
 from tokenizers import Tokenizer
 
 from markdown_index.markdown_node import MarkdownNode, extract_nodes, smart_table_split
-from markdown_index.utils import get_tokenizer, get_table_ranges
+from markdown_index.utils import get_tokenizer, get_table_ranges, fuzzy_score
 from markdown_index.chat import LLMChat
 from markdown_index.llm_ops.base import LLMOps, get_templates
 
@@ -110,7 +110,7 @@ class IndexConfig:
     max_tokens_per_node: Optional[int]=3000
     improve_table_split: bool = True
     n_summary_words: int = 50
-    approx_keyword_result_size: int = 500
+    approx_keyword_result_size: int = 100
 
 
 @dataclass
@@ -265,7 +265,7 @@ class MarkdownIndex:
 
         return retrieved_ids
 
-    def retrieve_block(self, query: str, block_ids: List[int]) -> List[str]:
+    def retrieve_blocks(self, query: str, block_ids: List[int]) -> List[str]:
         block_contents = [{
             "block_id": block_id,
             "full_title": self.nodes[block_id].full_title(),
@@ -295,32 +295,35 @@ class MarkdownIndex:
                 executor.submit(
                     self.llm_ops.retrieve_block,
                     query,
-                    json.dumps(block_list, ensure_ascii=False, indent=2)
+                    block_list
                 ) for block_list in block_lists
             ]
             for future in futures:
-                retrieved_texts.extend(future.result())
-                # Append summary to the retrieve result
-                retrieved_texts[-1]["summary"] = self.nodes[block_lists[-1]["block_id"]].summary
+                blocks = future.result()
+                for block in blocks:
+                    block = block.model_dump()
+                    block["title"] = self.nodes[block["block_id"]].full_title()
+                    block["summary"] = self.nodes[block["block_id"]].summary
+                    retrieved_texts.append(block)
         
         logger.info(f"Block retrieval finished, retrieved {len(retrieved_texts)} sentences")
 
         return retrieved_texts
     
     def _compute_match_score(self, keywords: Dict[str, Any], line: str) -> float:
-        occurences = []
+        scores = []
         for keyword in keywords:
             word = keyword["keyword"]
             synonyms = keyword["synonyms"]
 
-            occurence = line.count(word)
+            score = fuzzy_score(line, word)
             for synonym in synonyms:
-                occurence += line.count(synonym) * 0.8  # We add a discount to the synonyms
-            occurences.append(occurence)
+                score += fuzzy_score(line,synonym) * 0.8  # We add a discount to the synonyms
+            scores.append(score)
         
-        score = (np.mean(occurences)**0.5) * \
-            (np.prod([np.sqrt(o + 1) for o in occurences])**(1/len(occurences)))
-        
+        score = (np.mean(scores)**0.5) * \
+            (np.prod([np.sqrt(o + 1) for o in scores])**(1/len(scores)))
+
         # First term: total occurence score. If no occurence of any keywords, it is 0.
         # Second term: score considering different keywords. If all keywords have ocurrences, this term is large.
 
@@ -341,7 +344,7 @@ class MarkdownIndex:
                 if line_number - n_expand_lines < node.line_start and line_number + n_expand_lines + 1 >= node.line_end:
                     break
                 extracted_lines = self.markdown_lines[line_number - n_expand_lines: line_number + n_expand_lines + 1]
-                if self._count_tokens("\n".join(extracted_lines)) > self.llm_config.approx_max_input_tokens:
+                if self._count_tokens("\n".join(extracted_lines)) > self.index_config.approx_keyword_result_size:
                     break
                 n_expand_lines += 1
                  
@@ -354,10 +357,10 @@ class MarkdownIndex:
                     break
             
             extracted_blocks.append({
-                "block_id": node.id,
+                "block_id": self.nodes.index(node),
                 "full_title": node.full_title(),
                 "summary": node.summary,
-                "text": "\n".join(extracted_lines)
+                "related_text": "\n".join(extracted_lines)
             })
         
         return extracted_blocks
@@ -365,12 +368,13 @@ class MarkdownIndex:
 
     def search_by_index(self, query: str, n_results: int = 5):
         retrieved_ids = self.retrieve_index(query)
-        retrieved_blocks = self.retrieve_block(query, retrieved_ids)
+        retrieved_blocks = self.retrieve_blocks(query, retrieved_ids)
         return retrieved_blocks[:n_results]
 
     
     def search_by_keywords(self, query: str, n_results: int = 5):
-        keywords: List[Dict[str, Any]] = self.llm_ops.text_keywords(query, self.doc_summary)
+        keywords = self.llm_ops.text_keywords(query, self.doc_summary)
+        keywords = [keyword.model_dump() for keyword in keywords]
         logger.info(f"Keywords extracted: {keywords}")
         retrieved_blocks = self.keyword_search(keywords)
         return retrieved_blocks[:n_results]

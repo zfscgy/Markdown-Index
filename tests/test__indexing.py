@@ -53,7 +53,7 @@ def test__save_and_load():
         f.write(serialized_json)
 
 
-def test_retrieve():
+def test__retrieve():
     markdown_content = open("tests/data/中华人民共和国刑法.md", "r", encoding="utf-8").read()
     index_json = open("tests/data/中华人民共和国刑法__index.json", "r", encoding="utf-8").read()
     index_recovered = MarkdownIndex(
@@ -72,4 +72,4 @@ def test_retrieve():
 
 
 if __name__ == "__main__":
-    test__save_and_load()
+    test__retrieve()

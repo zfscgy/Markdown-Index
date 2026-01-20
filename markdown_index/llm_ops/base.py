@@ -141,7 +141,7 @@ class LLMOps:
         except ValidationError as e:
             raise ValueError(f"Invalid schema for text_summary: {e}") from e
         
-        return parsed
+        return parsed.summary
 
     def _doc_summary(self, index: str, n_summary_words: int) -> TextSummarySchema:
         prompt = self.templates.doc_summary_prompt_template(index, n_summary_words)
@@ -153,7 +153,7 @@ class LLMOps:
         except ValidationError as e:
             raise ValueError(f"Invalid schema for doc_summary: {e}") from e
         
-        return parsed
+        return parsed.summary
 
     def _text_keywords(self, content: str, doc_info: str = None) -> list[TextKeywordSchema]:
         prompt = self.templates.text_keywords_prompt_template(content, doc_info)
@@ -193,7 +193,7 @@ class LLMOps:
         except ValidationError as e:
             raise ValueError(f"Invalid schema for retrieve_index: {e}") from e
         
-        return parsed
+        return parsed.related_block_ids
 
 
     def _retrieve_block(self, query: str, block_list: list[Dict[str, Any]]) -> list[RetrieveBlockItemSchema]:
@@ -207,6 +207,5 @@ class LLMOps:
             items = _RETRIEVE_BLOCK_ADAPTER.validate_python(result)
         except ValidationError as e:
             raise ValueError(f"Invalid schema for retrieve_block: {e}") from e
-        
-        return items
 
+        return items

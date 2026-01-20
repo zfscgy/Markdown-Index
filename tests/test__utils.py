@@ -1,4 +1,4 @@
-from markdown_index.utils import get_table_ranges
+from markdown_index.utils import get_table_ranges, fuzzy_score
 
 
 def test__get_tables():
@@ -10,5 +10,11 @@ def test__get_tables():
         print("\n".join(md_lines[start:end]))
 
 
+def test__fuzzy_search():
+    text = "……交通事故肇事逃逸……"
+    pattern = "交通肇事"
+    score = fuzzy_score(text, pattern)
+    print(score)
+
 if __name__ == "__main__":
-    test__get_tables()
+    test__fuzzy_search()

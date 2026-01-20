@@ -117,7 +117,7 @@ class TestRetrieveBlockSchema:
     
     def test_wrong_type(self):
         """Test that wrong types raise error"""
-        invalid_data = [{"block_id": 123, "related_text": "text"}]
+        invalid_data = [{"block_id": "123", "related_text": "text"}]
         with pytest.raises(ValidationError):
             TypeAdapter(list[RetrieveBlockItemSchema]).validate_python(invalid_data)
     

@@ -20,8 +20,8 @@ class MarkdownNode:
         is_forced_split: bool = False,
     ):
         self.title: str = title
-        self.line_start: str = line_start
-        self.line_end: str = line_end
+        self.line_start: int = line_start
+        self.line_end: int = line_end
         self.text: str = text
         self.parent: Optional[Self] = parent
         self.summary: Optional[str] = None
