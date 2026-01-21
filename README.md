@@ -1,8 +1,10 @@
 # MarkdownIndex
 
-MarkdownIndex is a light-weight tool for searching long markdown documents.
-It generates index based on the structure of the markdown document, defined by the titles of different levels.
-It requires no vector database and text chunking, and only needs an OpenAI endpoint.
+<img src="docs/figs/main.png" alt="MarkdownIndex Overview" width="800"/>
+
+
+MarkdownIndex is a light-weight tool for searching long markdown documents (inspired by [PageIndex](https://github.com/VectifyAI/PageIndex), but developed totally from scratch). It generates index based on the structure of the markdown document, defined by the titles of different levels. It requires no vector database and text chunking, and only needs an OpenAI endpoint.
+
 The retrieval is based on two methods:
 
 * **Pageindex way**: We create index for each document, the LLM reads the index and then extract the relevant contents based on the user query, just like humna reading a book.
@@ -31,7 +33,7 @@ markdown_content = open("article.md", "r", encoding="utf-8").read()
 index = MarkdownIndex(
     markdown_content,
     llm_config=LLMConfig(openai_model_name="google/gemini-3-flash-preview"),
-    language="cn",
+    language="cn",  # 'cn' for chinese, 'en' for english
 )
 ```
 
@@ -48,13 +50,13 @@ print(json.dumps(results, ensure_ascii=False, indent=2))
 ```
 
 Save index (Convert the index to a JSON-formatted string, which could be stored in the filesystem):
-```
+```python
 serialized_index = index.serialize_index()
 print(json.dumps(json.loads(serialized_index), ensure_ascii=False, indent=2))
 ```
 
 Load index (Load the index from the serialized JSON string):
-```
+```python
 index_recovered = MarkdownIndex(
     index_data=serialized_index,
     llm_config=LLMConfig(openai_model_name="google/gemini-3-flash-preview"),
