@@ -3,7 +3,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 import json
 
-from markdown_index.markdown_index import IndexConfig, MarkdownIndex, LLMConfig
+from markdown_index import IndexConfig, MarkdownIndex, LLMConfig
 
 
 def test__indexing():
@@ -54,7 +54,6 @@ def test__save_and_load():
 
 
 def test__retrieve():
-    markdown_content = open("tests/data/中华人民共和国刑法.md", "r", encoding="utf-8").read()
     index_json = open("tests/data/中华人民共和国刑法__index.json", "r", encoding="utf-8").read()
     index_recovered = MarkdownIndex(
         index_data=index_json,

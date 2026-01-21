@@ -151,8 +151,8 @@ class MarkdownIndex:
 
         # 
         self.tokenizer = get_tokenizer(self.llm_config.tokenizer_name)
-        self.language = language
-        
+        self.language = language or "en"
+
         self.chat = LLMChat(
             model=self.llm_config.openai_model_name,
             base_url=self.llm_config.openai_base_url,
